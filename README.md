@@ -1,1 +1,1 @@
-# capstone
+# Capstone MoveLens Project Deliverables
