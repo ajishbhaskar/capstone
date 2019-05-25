@@ -1,0 +1,339 @@
+---
+title: "Capstone Movielens"
+author: "Ajish Bhaskar"
+date: "May 25, 2019"
+output: 
+        pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# 1. Introduction
+
+This documentation is my interpretaton of the MovieLens project, a Capstone Project done as part of the Harvard Edx Data Science Course. The purpose of this project is to create a movie rating recommendation system using Machine Learning techniques.Recommendation systems use ratings or preferences that users have given to items to make specific recommendations to the user. In this case, I have used the 10M version of the MovieLens dataset to build a machine learning algorithm using the inputs in one subset known as training set to predict movie ratings in the other subset known as the validation set. RMSE is used to evaluate how close the predictions are to the true values in the validation set.   
+
+# 1.1 About the MovieLens Dataset
+Edx has provided the code section to download the dataset and create the training set and the validation set. 
+
+```{r download, message = FALSE, warning = FALSE}
+#Packages and Libraries Used
+if(!require(tidyverse)) install.packages("tidyverse", repos = "http://cran.us.r-project.org")
+if(!require(caret)) install.packages("caret", repos = "http://cran.us.r-project.org")
+
+# MovieLens 10M dataset:
+# https://grouplens.org/datasets/movielens/10m/
+# http://files.grouplens.org/datasets/movielens/ml-10m.zip
+
+dl <- tempfile()
+download.file("http://files.grouplens.org/datasets/movielens/ml-10m.zip", dl)
+
+ratings <- read.table(text = gsub("::", "\t", readLines(unzip(dl, "ml-10M100K/ratings.dat"))),
+                      col.names = c("userId", "movieId", "rating", "timestamp"))
+
+movies <- str_split_fixed(readLines(unzip(dl, "ml-10M100K/movies.dat")), "\\::", 3)
+colnames(movies) <- c("movieId", "title", "genres")
+movies <- as.data.frame(movies) %>% mutate(movieId = as.numeric(levels(movieId))[movieId],
+                                           title = as.character(title),
+                                           genres = as.character(genres))
+
+movielens <- left_join(ratings, movies, by = "movieId")
+
+# Validation set will be 10% of MovieLens data
+
+set.seed(1) 
+test_index <- createDataPartition(y = movielens$rating, times = 1, p = 0.1, list = FALSE)
+edx <- movielens[-test_index,]
+temp <- movielens[test_index,]
+
+# Make sure userId and movieId in validation set are also in edx set
+
+validation <- temp %>% 
+     semi_join(edx, by = "movieId") %>%
+     semi_join(edx, by = "userId")
+
+# Add rows removed from validation set back into edx set
+
+removed <- anti_join(temp, validation)
+edx <- rbind(edx, removed)
+
+rm(dl, ratings, movies, test_index, temp, movielens, removed)
+
+```
+
+# 1.2 Additional libraries used
+I have also used the below additional libraries.
+```{r aditional_libs, message = FALSE, warning = FALSE}
+if(!require(gower)) install.packages("gower")
+if(!require(backports)) install.packages("backports")
+if(!require(GGally)) install.packages("GGally")
+library(backports)
+library(dslabs)
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+library(stringr)
+library(lattice)
+library(rlang)
+library(gower)
+library(caret)
+library(lubridate)
+library(broom)
+library(GGally)
+```
+
+# 2. Data Exploration
+Let us take a look at the edx dataset.
+```{r head}
+head(edx)
+```
+
+Summary Observation:
+```{r summary, message = FALSE}
+summary(edx)
+```
+
+Counts:
+
+Number of Movies : 
+```{r distinct_movieId, message = FALSE}
+n_distinct(edx$movieId)
+```
+Number of Genres :
+```{r distinct_genres, message = FALSE}
+n_distinct(edx$genres)
+```
+Number of Users:
+```{r distinct_userId, message = FALSE}
+n_distinct(edx$userId)
+```
+
+How many times each movies are reviewed? Lets plot a simple histogram
+
+```{r plot_movieId, message = FALSE, echo=FALSE}
+edx %>% count(movieId) %>% 
+  ggplot(aes(n)) + geom_histogram(bins = 10, fill = 'blue', color = "black") + 
+  scale_x_log10() + ggtitle("Movies Reviewed")
+```
+
+
+How about the users?
+
+```{r plot_userId, message = FALSE, echo=FALSE }
+edx %>% count(userId) %>% 
+  ggplot(aes(n)) + 
+  geom_histogram(bins = 10, fill = 'blue', color = "black") + 
+  scale_x_log10() + 
+  ggtitle("Users")
+```
+
+Now that we got a basic understanding of the dataset, let's move on to the next stage.
+
+# 3. Data Wrangling
+After a brief look at the dataset, it appears that the timestamp field, the datetime the movie was reviewed is not in a readily understandable format. Let's extract the year 'rating_year' and the date 'rating_date' of review and add as new columns.
+
+```{r rating_date, message = FALSE, warning = FALSE}
+edx <- mutate(edx, rating_year = year(as_datetime(timestamp)))
+edx <- mutate(edx, rating_date = as.Date(as_datetime(edx$timestamp), "%m/%d/%Y"))
+
+```
+
+Similarly the movie title has the year of release. Let's extract that to a new column 'title_year'
+
+```{r title_year, message = FALSE}
+title_year <- as.numeric(stringi::stri_extract(edx$title, regex = "(\\d{4})", comments = TRUE ))
+
+edx_with_dates <- edx %>% mutate(release_year = title_year)
+```
+
+Now take a look at the new columns:
+
+```{r head_edx_with_dates, message = FALSE}
+head(edx_with_dates)
+```
+
+Now let's see the oldest movie that we have.
+```{r movie_year, message = FALSE}
+movies_grouped_by_year <- edx_with_dates %>% group_by(release_year) %>% summarize(n = n()) %>% arrange(desc(release_year, n))
+movies_grouped_by_year
+```
+This reveals that the title year that we extracted has some invalid years. Let's see how many invalid years we have
+
+```{r invalid_year, message = FALSE}
+junk_dates <- edx_with_dates %>% filter(release_year > 2010 | release_year < 1900)
+junk_dates %>% group_by(movieId, title, release_year) %>% summarize(n = n())
+```
+This shows that we have only 14 movies that have invalid release date assigned. We can easily fix them and get a clean dataset.
+
+```{r data_cleaning, message = FALSE}
+edx_with_dates[edx_with_dates$movieId == "671", "release_year"] <- 1996
+edx_with_dates[edx_with_dates$movieId == "1422", "release_year"] <- 1997
+edx_with_dates[edx_with_dates$movieId == "2308", "release_year"] <- 1973
+edx_with_dates[edx_with_dates$movieId == "4159", "release_year"] <- 2001
+edx_with_dates[edx_with_dates$movieId == "4311", "release_year"] <- 1998
+edx_with_dates[edx_with_dates$movieId == "5310", "release_year"] <- 1985
+edx_with_dates[edx_with_dates$movieId == "5472", "release_year"] <- 1972
+edx_with_dates[edx_with_dates$movieId == "6290", "release_year"] <- 2003
+edx_with_dates[edx_with_dates$movieId == "6645", "release_year"] <- 1971
+edx_with_dates[edx_with_dates$movieId == "8198", "release_year"] <- 1960
+edx_with_dates[edx_with_dates$movieId == "8864", "release_year"] <- 2004
+edx_with_dates[edx_with_dates$movieId == "8905", "release_year"] <- 1992
+edx_with_dates[edx_with_dates$movieId == "27266", "release_year"] <- 2004
+edx_with_dates[edx_with_dates$movieId == "53953", "release_year"] <- 2007
+
+```
+
+Now take a look at the cleansed dataset.
+
+```{r display_cleansed, message = FALSE}
+head(edx_with_dates)
+```
+Now that the dataset is in reasonably good shape, lets do some data analysis.
+
+# 4. Data Analysis
+Is there a relationship between the movieID and the average ratings. What are the ratings that movies get consistently?
+
+```{r plot_movie_avg, message = FALSE}
+avg_mov_rating <- edx_with_dates %>% group_by(movieId) %>% summarize(avg_movie_rating = mean(rating))
+head(avg_mov_rating)
+avg_mov_rating %>% ggplot(aes(movieId, avg_movie_rating)) + 
+  geom_point(alpha = 0.05)
+
+```
+
+Now let's see the release year that we got above has any significants? In order to do that let's introduce the age of the movie, which is the number of years from the release of the movie to the year of our analysis 2019. Then determine the average rating by the age of the movie and do a simple geom point plot.
+
+```{r movie_age, message = FALSE}
+#Let's calculate the age of the movie
+edx_movies_and_age <-  edx_with_dates %>% mutate(movie_age = 2019 - release_year)
+
+head(edx_movies_and_age)
+
+#Now let's if age of the movie has any relationship.. like classics have better rating?
+avg_rating_age <- edx_movies_and_age %>% group_by(movie_age) %>% summarize(avg_rating_by_age = mean(rating))
+
+head(avg_rating_age)
+
+#Now lets plot a simple geom point
+avg_rating_age %>%
+  ggplot(aes(movie_age, avg_rating_by_age)) + geom_point()
+
+```
+
+Let's see if there is a corelation between the age of the movie and the average rating? We can plot a ggpairs mapping.
+
+```{r ggpair_avgrt_age, message = FALSE, echo=FALSE}
+#Let's examine the corelations
+ggpairs(avg_rating_age, mapping = aes(color = "movie_age"),  
+        upper = list(continuous = wrap("cor", size = 5)), 
+        lower = list(continuous = "smooth"))
+
+```
+Now let's see if we can use linear model to get the coefficient.
+
+```{r lm_statistics, message = FALSE}
+lm_stat <- lm(avg_rating_by_age ~ movie_age, data = avg_rating_age) 
+tidy_data_4plot <- tidy(lm_stat, conf.int = TRUE)
+lm_stat %>% .$coef
+```
+
+Now that we have a reasonably good understanding of the dataset, let's move on to the next phase.
+
+# 5. Prediction & RMSE
+
+I will be utilizing the mu, b_i and b_u parameters in the my prediction as outlined in the Machine Learning course.
+
+To begin with lets do the RMSE setup. 
+
+
+```{r RMSE_setup, message = FALSE}
+RMSE <- function(true_ratings, predicted_ratings){
+  sqrt(mean((true_ratings - predicted_ratings)^2))
+}
+```
+
+Now let's see use regularization and tune lamdas and see if we can pick the best lambda for our prediction.
+
+```{r RMSE_lambda, message = FALSE}
+# Tuning Parameter Lamda
+lambdas <- seq(0, 10, 0.25)
+
+#Let's see if we can pick the best rmses
+
+rmses <- sapply(lambdas, function(l){
+
+# mu as the mean rating
+mu <- mean(edx_with_dates$rating)
+
+#b_i 
+b_i <- edx_with_dates %>%
+  group_by(movieId) %>%
+  summarize(b_i = sum(rating - mu)/(n() + l))
+
+#b_i
+b_u <- edx_with_dates %>%
+  left_join(b_i, by='movieId') %>% 
+  group_by(userId) %>%
+  summarize(b_u = sum(rating - b_i - mu)/(n() +l))
+
+#pred using mu, b_i and b_u
+predicted_ratings <- edx_with_dates %>%
+  left_join(b_i, by = "movieId") %>%
+  left_join(b_u, by = "userId") %>%
+  mutate(pred = mu + b_i +  b_u) %>% pull(pred)
+
+return(RMSE(predicted_ratings, edx_with_dates$rating))
+
+})
+
+```
+
+Now let's plot the lamdas that we used and the rmses returned.
+
+```{r plot_RMSE_lambda, message = FALSE}
+
+#let's plot the lamdas vs rmses
+qplot(lambdas, rmses)
+```
+
+The best lambda value that we can use for our prediction is 
+```{r which_lambda, message = FALSE}
+#which lambdas results in the smallest rmses?
+best_lambdas <- lambdas[which.min(rmses)]
+best_lambdas
+```
+
+Now let's apply our predictioin on the validation set and see how reasonable our prediction is.
+
+```{r pred_validiation, message = FALSE}
+# I am renaming the variable to _val for my own sanity..
+
+mu_val <- mean(validation$rating)
+l_val <- best_lambdas
+
+b_i_val <- validation %>%
+  group_by(movieId) %>%
+  summarize(b_i_val = sum(rating - mu_val)/(n() + l_val))
+
+b_u_val <- validation %>%
+  left_join(b_i_val, by='movieId') %>% 
+  group_by(userId) %>%
+  summarize(b_u_val = sum(rating - b_i_val - mu_val)/(n() +l_val))
+
+predicted_ratings <- validation %>%
+  left_join(b_i_val, by = "movieId") %>%
+  left_join(b_u_val, by = "userId") %>%
+  mutate(pred = mu_val + b_i_val +  b_u_val) %>% pull(pred)
+```
+
+Lets see what is the RMSE of our predicted rating on the validation set.
+
+```{r RMSE_validiation, message = FALSE}
+RMSE(predicted_ratings, validation$rating)
+```
+
+# 6. Conclusion
+I used movieId and userId to calculate the RMSE and was able to achieve reasonable RMSE. This was a good project that helped me reinforce the techniques that I learned in the Harvard Exd Data Science Courses.Thanks! 
+
+
